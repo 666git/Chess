@@ -135,6 +135,11 @@
             background-color: #3d8b40;
             transform: scale(0.98);
         }
+        .no-data {
+            text-align: center;
+            padding: 20px;
+            color: #999;
+        }
         @media (max-width: 374px) {
             .contract-table th, .contract-table td {
                 padding: 6px 4px;
@@ -178,7 +183,7 @@
                         </tr>
                     </thead>
                     <tbody id="contracts-data">
-                        <!-- 合约数据将在这里动态加载 -->
+                        <tr><td colspan="9" class="no-data">正在加载行情数据...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -190,7 +195,8 @@
         const tqsdk = new TQSDK();
         let mainContracts = [];
         let quotes = {};
-        let sortDirection = 'desc'; // 默认降序排列
+        let sortDirection = 'desc';
+        let lastUpdateTime = 0;
         
         // 更新状态显示
         function updateStatus(message, type) {
@@ -201,14 +207,14 @@
         
         // 格式化时间戳
         function formatDateTime(timestamp) {
-            if (!timestamp) return '-';
+            if (!timestamp || timestamp < 1000000) return '-';
             const date = new Date(timestamp / 1e6);
-            return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            return date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
         }
         
         // 计算涨跌百分比
         function calculateChangePercent(quote) {
-            if (!quote.last_price || !quote.pre_settlement) return null;
+            if (!quote || !quote.last_price || !quote.pre_settlement) return null;
             return ((quote.last_price - quote.pre_settlement) / quote.pre_settlement * 100);
         }
         
@@ -230,7 +236,6 @@
             mainContracts.sort((a, b) => {
                 const changeA = calculateChangePercent(quotes[a]) || 0;
                 const changeB = calculateChangePercent(quotes[b]) || 0;
-                
                 return sortDirection === 'asc' ? changeA - changeB : changeB - changeA;
             });
         }
@@ -238,133 +243,182 @@
         // 更新合约表格
         function updateContractTable() {
             const tableBody = document.getElementById('contracts-data');
-            tableBody.innerHTML = '';
             
-            // 排序合约
+            // 检查是否有数据
+            const hasData = mainContracts.some(symbol => 
+                quotes[symbol] && quotes[symbol].last_price
+            );
+            
+            if (!hasData) {
+                tableBody.innerHTML = `<tr><td colspan="9" class="no-data">已订阅 ${mainContracts.length} 个合约，等待行情数据...</td></tr>`;
+                return;
+            }
+            
+            tableBody.innerHTML = '';
             sortContracts();
             
+            let dataCount = 0;
             mainContracts.forEach(symbol => {
                 const quote = quotes[symbol] || {};
                 const change = calculateChangePercent(quote);
                 const priceClass = getPriceColorClass(change);
                 
+                // 跳过完全没有数据的合约
+                if (!quote.last_price && !quote.bid_price1 && !quote.ask_price1) return;
+                
+                dataCount++;
                 const row = document.createElement('tr');
-                row.id = `row-${symbol}`;
-                
-                // 合约名称单元格
-                const symbolCell = document.createElement('td');
-                symbolCell.textContent = symbol;
-                row.appendChild(symbolCell);
-                
-                // 涨跌百分比单元格
-                const changeCell = document.createElement('td');
-                changeCell.textContent = formatChangePercent(change);
-                if (priceClass) changeCell.className = priceClass;
-                row.appendChild(changeCell);
-                
-                // 最新价单元格
-                const priceCell = document.createElement('td');
-                priceCell.textContent = quote.last_price || '-';
-                if (priceClass) priceCell.className = priceClass;
-                row.appendChild(priceCell);
-                
-                // 昨结单元格
-                const preSettleCell = document.createElement('td');
-                preSettleCell.textContent = quote.pre_settlement || '-';
-                row.appendChild(preSettleCell);
-                
-                // 成交量单元格
-                const volumeCell = document.createElement('td');
-                volumeCell.textContent = quote.volume || '-';
-                row.appendChild(volumeCell);
-                
-                // 持仓量单元格
-                const oiCell = document.createElement('td');
-                oiCell.textContent = quote.open_interest || '-';
-                row.appendChild(oiCell);
-                
-                // 买价单元格
-                const bidPriceCell = document.createElement('td');
-                bidPriceCell.textContent = quote.bid_price1 || '-';
-                row.appendChild(bidPriceCell);
-                
-                // 卖价单元格
-                const askPriceCell = document.createElement('td');
-                askPriceCell.textContent = quote.ask_price1 || '-';
-                row.appendChild(askPriceCell);
-                
-                // 时间单元格
-                const timeCell = document.createElement('td');
-                timeCell.textContent = formatDateTime(quote.datetime);
-                row.appendChild(timeCell);
-                
+                row.innerHTML = `
+                    <td>${symbol}</td>
+                    <td class="${priceClass}">${formatChangePercent(change)}</td>
+                    <td class="${priceClass}">${quote.last_price || '-'}</td>
+                    <td>${quote.pre_settlement || '-'}</td>
+                    <td>${quote.volume || '-'}</td>
+                    <td>${quote.open_interest || '-'}</td>
+                    <td>${quote.bid_price1 || '-'}</td>
+                    <td>${quote.ask_price1 || '-'}</td>
+                    <td>${formatDateTime(quote.datetime)}</td>
+                `;
                 tableBody.appendChild(row);
             });
+            
+            if (dataCount === 0) {
+                tableBody.innerHTML = `<tr><td colspan="9" class="no-data">暂无有效行情数据</td></tr>`;
+            } else {
+                lastUpdateTime = Date.now();
+                updateStatus(`数据已更新 (${formatDateTime(lastUpdateTime * 1e6)})`, 'connected');
+            }
         }
         
         // 获取主力合约并订阅
         function subscribeToMainContracts() {
-            // 获取所有连续合约
-            const allContracts = tqsdk.getQuotesByInput('', {future_cont: true});
+            updateStatus('正在获取合约列表...', 'connecting');
             
-            // 过滤只保留主力合约 (KQ.m)
-            mainContracts = allContracts.filter(symbol => symbol.includes('KQ.m'));
-            
-            updateStatus(`已找到 ${mainContracts.length} 个主力合约，正在订阅...`, 'connected');
-            
-            // 初始化行情对象
-            mainContracts.forEach(symbol => {
-                quotes[symbol] = tqsdk.getQuote(symbol);
-            });
-            
-            // 订阅所有过滤后的主力合约
-            tqsdk.subscribeQuote(mainContracts);
-            
-            // 初始更新
-            updateContractTable();
+            try {
+                const allContracts = tqsdk.getQuotesByInput('', {future_cont: true});
+                mainContracts = allContracts.filter(symbol => symbol.includes('KQ.m'));
+                
+                if (mainContracts.length === 0) {
+                    updateStatus('未找到主力合约', 'error');
+                    return;
+                }
+                
+                updateStatus(`发现 ${mainContracts.length} 个主力合约，正在订阅...`, 'connected');
+                quotes = {};
+                
+                // 分批订阅避免压力
+                let subscribedCount = 0;
+                const batchSize = 5;
+                const totalBatches = Math.ceil(mainContracts.length / batchSize);
+                
+                function subscribeBatch(batchIndex) {
+                    const start = batchIndex * batchSize;
+                    const end = Math.min(start + batchSize, mainContracts.length);
+                    const batch = mainContracts.slice(start, end);
+                    
+                    batch.forEach(symbol => {
+                        quotes[symbol] = tqsdk.getQuote(symbol);
+                        tqsdk.subscribeQuote([symbol]);
+                    });
+                    
+                    subscribedCount += batch.length;
+                    updateStatus(`订阅中 (${subscribedCount}/${mainContracts.length})...`, 'connecting');
+                    
+                    if (batchIndex < totalBatches - 1) {
+                        setTimeout(() => subscribeBatch(batchIndex + 1), 300);
+                    } else {
+                        setTimeout(() => {
+                            updateContractTable();
+                            updateStatus(`订阅完成，等待数据更新...`, 'connected');
+                        }, 1000);
+                    }
+                }
+                
+                subscribeBatch(0);
+            } catch (e) {
+                console.error('订阅错误:', e);
+                updateStatus(`订阅出错: ${e.message}`, 'error');
+            }
         }
         
         // 事件监听
         tqsdk.on('ready', function() {
-            updateStatus('已连接行情服务器，正在获取主力合约...', 'connected');
+            updateStatus('已连接行情服务器', 'connected');
             subscribeToMainContracts();
             
             // 监听数据更新
             tqsdk.on('rtn_data', function() {
-                let needsUpdate = false;
+                let updated = false;
+                const now = Date.now();
                 
-                // 检查是否有行情变化
+                // 限制更新频率 (最少500ms更新一次)
+                if (now - lastUpdateTime < 500) return;
+                
                 mainContracts.forEach(symbol => {
-                    if (tqsdk.isChanging(quotes[symbol])) {
-                        needsUpdate = true;
+                    const newQuote = tqsdk.getQuote(symbol);
+                    if (!quotes[symbol] || JSON.stringify(quotes[symbol]) !== JSON.stringify(newQuote)) {
+                        quotes[symbol] = newQuote;
+                        updated = true;
                     }
                 });
                 
-                if (needsUpdate) {
+                if (updated) {
                     updateContractTable();
                 }
             });
         });
         
         tqsdk.on('error', function(error) {
-            updateStatus('连接行情服务器出错: ' + error, 'error');
             console.error('TQSDK error:', error);
+            updateStatus('连接错误: ' + error.message, 'error');
+            
+            // 10秒后尝试重新连接
+            setTimeout(() => {
+                if (!tqsdk.isReady()) {
+                    updateStatus('尝试重新连接...', 'connecting');
+                    tqsdk.connect();
+                }
+            }, 10000);
         });
         
         // 刷新按钮处理
         document.getElementById('refresh-btn').addEventListener('click', function() {
             if (tqsdk.isReady()) {
-                updateStatus('正在刷新主力合约数据...', 'connected');
                 subscribeToMainContracts();
+            } else {
+                updateStatus('正在重新连接服务器...', 'connecting');
+                tqsdk.connect();
             }
         });
         
-        // 涨跌%表头点击处理 - 切换升序/降序
+        // 涨跌%表头点击处理
         document.getElementById('change-header').addEventListener('click', function() {
             sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
             document.getElementById('change-sort-icon').textContent = sortDirection === 'asc' ? '↑' : '↓';
             updateContractTable();
         });
+        
+        // 心跳检测 (每5秒检查一次数据更新)
+        setInterval(() => {
+            if (tqsdk.isReady()) {
+                const now = Date.now();
+                // 如果超过15秒没有数据更新
+                if (lastUpdateTime > 0 && now - lastUpdateTime > 15000) {
+                    updateStatus('数据更新延迟，正在检查连接...', 'connecting');
+                    // 测试重新订阅第一个合约
+                    if (mainContracts.length > 0) {
+                        tqsdk.subscribeQuote([mainContracts[0]]);
+                    }
+                }
+            }
+        }, 5000);
+        
+        // 初始连接状态检查
+        setTimeout(() => {
+            if (!tqsdk.isReady()) {
+                updateStatus('连接超时，请检查网络', 'error');
+            }
+        }, 10000);
     </script>
 </body>
 </html>
